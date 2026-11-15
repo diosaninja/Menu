@@ -835,7 +835,7 @@ function fmtCode(c){return (c||'').match(/.{1,4}/g).join('-')}
 function genCode(){const A='ABCDEFGHJKMNPQRSTUVWXYZ23456789';const a=new Uint32Array(16);crypto.getRandomValues(a);return [...a].map(x=>A[x%A.length]).join('')}
 function parseCfg(t){
   if(!t)return null;if(typeof t==='object')return t;
-  const o={};['apiKey','authDomain','projectId','storageBucket','messagingSenderId','appId'].forEach(k=>{const m=String(t).match(new RegExp('["\']?'+k+'["\']?\\s*:\\s*["\']([^"\']+)["\']'));if(m)o[k]=m[1]});
+  const o={};['apiKey','authDomain','projectId','storageBucket','messagingSenderId','appId'].forEach(k=>{const m=String(t).replace(/[“”«»]/g,'"').replace(/[‘’]/g,"'").match(new RegExp('["\']?'+k+'["\']?\\s*:\\s*["\']([^"\']+)["\']'));if(m)o[k]=m[1]});
   if(!o.apiKey||!o.projectId||!o.appId)return null;if(!o.authDomain)o.authDomain=o.projectId+'.firebaseapp.com';return o;
 }
 const b64e=s=>btoa(unescape(encodeURIComponent(s))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
@@ -966,21 +966,28 @@ function shareBox(){
   }
   return `<div class="box"><h3>👥 Compartir con otra persona</h3>
     <p class="hint" style="margin:0 0 12px">Comparte el menú, las recetas, la despensa y la lista de la compra. Los cambios aparecen solos en todos los dispositivos conectados.</p>
-    <div class="field"><label>Unirme a una cocina compartida</label><textarea class="in" id="joinIn" rows="2" placeholder="Pega aquí el enlace de invitación que te enviaron"></textarea></div>
-    <button class="btn olive block" data-join>Unirme</button>
-    <details style="margin-top:16px"><summary class="lbl" style="cursor:pointer">Crear una cocina compartida nueva (con mi Firebase)</summary>
-      <div class="field" style="margin-top:10px"><label>Configuración de Firebase</label><textarea class="in" id="fbcfg" rows="5" placeholder="Pega aquí el bloque firebaseConfig = { apiKey: …, projectId: …, appId: … }">${SYNC.cfg?esc(JSON.stringify(SYNC.cfg,null,1)):''}</textarea></div>
-      <p class="hint">Lo que tengas ahora en este dispositivo pasará a la cocina compartida.</p>
-      <button class="btn primary block" data-create>Crear cocina compartida</button></details></div>`;
+    <div class="seg" style="width:100%;margin-bottom:14px"><button style="flex:1" data-mode="create" class="${ui.shareMode!=='join'?'on':''}">Crear la cocina</button><button style="flex:1" data-mode="join" class="${ui.shareMode==='join'?'on':''}">Unirme con una invitación</button></div>
+    ${ui.shareMode==='join'?`
+      <p class="hint" style="margin:0 0 8px">Para quien recibe la invitación (o para tus otros dispositivos).</p>
+      <div class="field"><label>Enlace de invitación</label><textarea class="in" id="joinIn" rows="3" placeholder="Pega aquí el enlace de invitación que te enviaron (empieza por https://…?cocina=…)"></textarea></div>
+      <button class="btn olive block" data-join>Unirme</button>`:`
+      <p class="hint" style="margin:0 0 8px">Hazlo solo una vez, en el dispositivo que ya tiene tus recetas. Lo que hay aquí pasará a la cocina compartida.</p>
+      <div class="field"><label>Configuración de Firebase</label><textarea class="in" id="fbcfg" rows="6" placeholder="Pega aquí el bloque de Firebase: const firebaseConfig = { apiKey: …, projectId: …, appId: … }">${SYNC.cfg?esc(JSON.stringify(SYNC.cfg,null,1)):''}</textarea></div>
+      <button class="btn primary block" data-create>Crear cocina compartida</button>`}
+  </div>`;
 }
 function inviteText(){return `Te invito a mi cocina compartida en la app Menú 🍽️\n\n1. Abre la app: ${location.origin}${location.pathname}\n2. Ve a Ajustes ⚙️ → «Unirme» y pega este enlace:\n\n${inviteLink()}`}
 function mountShare(r){
   const busy=(b,t)=>{b.disabled=true;b.style.opacity=.6;b.textContent=t};
-  const j=$('[data-join]',r);if(j)j.onclick=async()=>{const{code,cfg}=parseInvite($('#joinIn',r).value);const c=cfg||SYNC.cfg;
-    if(!code){toast('Ese enlace o código no es válido');return}if(!c){toast('Usa el enlace de invitación completo');return}
+  $$('[data-mode]',r).forEach(b=>b.onclick=()=>{ui.shareMode=b.dataset.mode;refresh()});
+  const j=$('[data-join]',r);if(j)j.onclick=async()=>{const txt=$('#joinIn',r).value;
+    if(parseCfg(txt)&&!/cocina=/.test(txt)){ui.shareMode='create';refresh();const f=$('#fbcfg');if(f)f.value=txt;toast('Eso es la configuración de Firebase: la he puesto en «Crear la cocina»');return}
+    const{code,cfg}=parseInvite(txt);const c=cfg||SYNC.cfg;
+    if(!code){toast('Ese enlace de invitación no es válido. Cópialo entero.');return}if(!c){toast('Usa el enlace de invitación completo');return}
     if(!(await ask('Lo que hay ahora en este dispositivo se reemplazará por la cocina compartida.','Unirme',false)))return;
     busy(j,'Conectando…');try{await joinKitchen(c,code);toast('¡Conectada a la cocina compartida!');refresh()}catch(e){toast(e.message||'No se pudo conectar');refresh()}};
-  const cr=$('[data-create]',r);if(cr)cr.onclick=async()=>{const cfg=parseCfg($('#fbcfg',r).value);if(!cfg){toast('No reconozco esa configuración de Firebase');return}
+  const cr=$('[data-create]',r);if(cr)cr.onclick=async()=>{const raw=$('#fbcfg',r).value;if(/cocina=/.test(raw)){ui.shareMode='join';refresh();const f=$('#joinIn');if(f)f.value=raw;toast('Eso es una invitación: la he puesto en «Unirme»');return}
+    const cfg=parseCfg(raw);if(!cfg){toast('No reconozco la configuración. Copia el bloque entero de firebaseConfig.');return}
     busy(cr,'Creando…');try{await createKitchen(cfg);toast('Cocina compartida creada');refresh()}catch(e){console.warn(e);await leaveKitchen().catch(()=>{});SYNC.cfg=cfg;toast(e.message||'No se pudo crear');refresh()}};
   const ic=$('[data-invcopy]',r);if(ic)ic.onclick=async()=>{try{await navigator.clipboard.writeText(inviteText());toast('Invitación copiada')}catch(e){toast('No se pudo copiar')}};
   const is=$('[data-invshare]',r);if(is)is.onclick=async()=>{try{await navigator.share({title:'Cocina compartida · Menú',text:inviteText()})}catch(e){}};
