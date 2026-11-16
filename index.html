@@ -953,6 +953,26 @@ async function exportData(){
 }
 
 /* ===== COCINA COMPARTIDA (Firebase) ===== */
+function hasOwnData(){return S.recipes.some(r=>!r.sample)||S.pantry.some(p=>!p.sample)||S.manual.length>0||Object.keys(S.plan).length>0}
+function chooseJoin(){return new Promise(res=>{let done=false;const fin=v=>{done=true;closeSheet();res(v)};
+  openSheet({title:'Unirme a la cocina',narrow:true,
+    body:()=>`<p class="hint" style="margin:0 0 14px">En este dispositivo tienes ${S.recipes.filter(r=>!r.sample).length} recetas propias, ${S.pantry.filter(p=>!p.sample).length} productos en la despensa y ${S.manual.length} en la lista de la compra. ¿Qué hago con ellos?</p>
+      <div class="plist" style="margin-top:0">
+      <button class="pitem" data-k="keep"><span class="th">➕</span><span style="flex:1"><b>Unirme y añadir lo que tengo aquí</b><span class="hint">Se juntan con lo de la cocina compartida. No se pierde nada (los datos de ejemplo no se añaden).</span></span></button>
+      <button class="pitem" data-k="replace"><span class="th">🔄</span><span style="flex:1"><b>Unirme y empezar con lo de la cocina</b><span class="hint">Lo de este dispositivo se sustituye por lo de la cocina compartida.</span></span></button></div>`,
+    mount:r=>$$('[data-k]',r).forEach(b=>b.onclick=()=>fin(b.dataset.k)),onClose:()=>{if(!done)res(null)}})})}
+function mergeLocalInto(L){
+  const n=x=>norm(x);
+  L.recipes.filter(r=>!r.sample&&!S.recipes.some(x=>n(x.name)===n(r.name))).forEach(r=>S.recipes.push(r));
+  L.pantry.filter(p=>!p.sample).forEach(p=>{const u=toBase(1,p.unit).u;if(!S.pantry.some(x=>n(x.name)===n(p.name)&&(x.qty==null||p.qty==null||toBase(1,x.unit).u===u))){const{sample,...q}=p;S.pantry.push(q)}});
+  L.manual.forEach(m=>{if(!S.manual.some(x=>n(x.name)===n(m.name)))S.manual.push({...m,ts:m.ts||Date.now()})});
+  Object.entries(L.plan||{}).forEach(([d,day])=>{const R=S.plan[d];
+    if(!R){const c=JSON.parse(JSON.stringify(day));MEALS.forEach(m=>c[m.k]=(c[m.k]||[]).filter(e=>!(e.recipeId&&!S.recipes.some(r=>r.id===e.recipeId))));if(MEALS.some(m=>c[m.k].length))S.plan[d]=c;return}
+    MEALS.forEach(m=>(day[m.k]||[]).forEach(e=>{if(e.recipeId&&!S.recipes.some(r=>r.id===e.recipeId))return;const nm=n(entryName(e));R[m.k]=R[m.k]||[];if(!R[m.k].some(x=>n(entryName(x))===nm))R[m.k].push(e)}))});
+  Object.keys(L.checked||{}).forEach(k=>S.checked[k]=true);
+  Object.entries(L.sections||{}).forEach(([k,v])=>{S.sections=S.sections||{};if(!S.sections[k])S.sections[k]=v});
+}
+
 const SYNC={on:false,ready:false,code:null,cfg:null,api:null,db:null,last:{},unsubs:[],status:'off',photos:{},pend:false,pushT:null,got:new Set()};
 const COLS=['recipes','photos','days','pantry','manual','checked','sections','meta'];
 const FB_VER='10.12.2';
@@ -1012,15 +1032,17 @@ function persistLast(){DB.set('synclast',SYNC.last)}
 async function pushChanges(){
   if(!SYNC.on)return;if(!SYNC.ready){SYNC.pend=true;return}
   const{doc,writeBatch,setDoc}=SYNC.api,db=SYNC.db,code=SYNC.code;const m=localMaps();
-  let batch=writeBatch(db),n=0;const commits=[];let any=false;
+  let batch=writeBatch(db),n=0;const commits=[];let any=false;const prev=[];clearTimeout(SYNC.retryT);
   const flush=()=>{if(n){commits.push(batch.commit());batch=writeBatch(db);n=0}};
   for(const c of COLS){const L=m[c],last=SYNC.last[c];
-    for(const id in L){const data=clean(L[id]),j=stable(data);if(last[id]!==j){last[id]=j;any=true;
+    for(const id in L){const data=clean(L[id]),j=stable(data);if(last[id]!==j){prev.push([c,id,last[id],j]);last[id]=j;any=true;
       if(c==='photos')commits.push(setDoc(doc(db,'cocinas',code,c,id),data));else{batch.set(doc(db,'cocinas',code,c,id),data);if(++n>=400)flush()}}}
-    for(const id in last){if(!(id in L)){delete last[id];any=true;batch.delete(doc(db,'cocinas',code,c,id));if(++n>=400)flush()}}
+    for(const id in last){if(!(id in L)){prev.push([c,id,last[id],undefined]);delete last[id];any=true;batch.delete(doc(db,'cocinas',code,c,id));if(++n>=400)flush()}}
   }
   flush();
-  if(any){persistLast();Promise.all(commits).then(()=>{if(SYNC.status!=='ok'){SYNC.status='ok';syncBadge()}}).catch(e=>{console.warn(e);SYNC.status='error';syncBadge()})}
+  if(any){persistLast();Promise.all(commits).then(()=>{if(SYNC.status!=='ok'){SYNC.status='ok';syncBadge()}}).catch(e=>{console.warn(e);
+    prev.forEach(([c,id,old,now])=>{if(SYNC.last[c][id]===now){if(old===undefined)delete SYNC.last[c][id];else SYNC.last[c][id]=old}});persistLast();
+    SYNC.status='error';syncBadge();SYNC.retryT=setTimeout(pushChanges,30000)})}
 }
 function applySet(c,id,d){
   if(c==='recipes'){const i=S.recipes.findIndex(r=>r.id===id);const old=i>=0?S.recipes[i]:null;const r={...d,id,photo:SYNC.photos[id]||(old?old.photo:null)||null};if(i>=0)S.recipes[i]=r;else S.recipes.push(r)}
@@ -1041,6 +1063,10 @@ function applyRemove(c,id){
 }
 let rendT=null;
 function remoteChanged(){DB.set('state',JSON.parse(JSON.stringify(S)));persistLast();clearTimeout(rendT);rendT=setTimeout(()=>{render();const c=stack[stack.length-1];if(c&&c.live)refresh()},120)}
+function localHas(c,id,d){
+  if(c==='recipes')return !!getR(id);if(c==='photos'){const r=getR(id);return !!(r&&r.photo)}
+  if(c==='days')return !!S.plan[id];if(c==='pantry'||c==='manual')return S[c].some(x=>x.id===id);
+  if(c==='checked')return !!S.checked[d.k];if(c==='sections')return !!(S.sections&&S.sections[d.n]);return false}
 function subscribe(){
   const{collection,onSnapshot}=SYNC.api;SYNC.got=new Set();
   COLS.forEach(c=>{SYNC.unsubs.push(onSnapshot(collection(SYNC.db,'cocinas',SYNC.code,c),snap=>{
@@ -1048,7 +1074,7 @@ function subscribe(){
     snap.docChanges().forEach(x=>{const id=x.doc.id;
       if(x.type==='removed'){if(id in SYNC.last[c]||true){delete SYNC.last[c][id];applyRemove(c,id);ch=true}return}
       if(x.doc.metadata&&x.doc.metadata.hasPendingWrites)return;
-      const d=x.doc.data();const j=stable(d);if(SYNC.last[c][id]===j&&c!=='photos'&&c!=='recipes'&&c!=='days')return;
+      const d=x.doc.data();const j=stable(d);if(SYNC.last[c][id]===j&&localHas(c,id,d))return;
       SYNC.last[c][id]=j;applySet(c,id,d);ch=true});
     if(ch)remoteChanged();
     SYNC.status=snap.metadata&&snap.metadata.fromCache?'cache':'ok';syncBadge();
@@ -1063,13 +1089,19 @@ async function createKitchen(cfg){
   await withTimeout(SYNC.api.setDoc(SYNC.api.doc(SYNC.db,'cocinas',SYNC.code),{creada:Date.now()}),20000,'Sin respuesta de Firebase. Revisa la conexión y las reglas.');
   await saveSyncConf();SYNC.ready=true;await pushChanges();SYNC.ready=false;subscribe();syncBadge();
 }
-async function joinKitchen(cfg,code){
+async function joinKitchen(cfg,code,keep){
   SYNC.last={};SYNC.photos={};
   await fbConnect(cfg,code);
   const snap=await withTimeout(SYNC.api.getDoc(SYNC.api.doc(SYNC.db,'cocinas',code)),20000,'Sin respuesta de Firebase. Revisa la conexión.');
   if(!snap.exists()){unsubscribeAll();Object.assign(SYNC,{on:false,code:null});throw new Error('No existe ninguna cocina con ese código.')}
-  const timers=S.timers;S={...blank(),timers};DB.set('state',JSON.parse(JSON.stringify(S)));
-  await saveSyncConf();persistLast();subscribe();render();syncBadge();
+  const local=keep?JSON.parse(JSON.stringify(S)):null;
+  const timers=S.timers;S={...blank(),timers};
+  if(keep){const{collection,getDocs}=SYNC.api;
+    for(const c of COLS){const q=await withTimeout(getDocs(collection(SYNC.db,'cocinas',code,c)),20000,'Sin respuesta de Firebase. Revisa la conexión.');
+      q.docs.forEach(x=>{const d=x.data();SYNC.last[c][x.id]=stable(d);applySet(c,x.id,d)})}
+    mergeLocalInto(local)}
+  DB.set('state',JSON.parse(JSON.stringify(S)));
+  await saveSyncConf();persistLast();subscribe();render();syncBadge();if(keep){SYNC.pend=true}
 }
 async function leaveKitchen(){unsubscribeAll();clearTimeout(SYNC.pushT);Object.assign(SYNC,{on:false,ready:false,code:null,last:{},status:'off'});await saveSyncConf();await DB.set('synclast',{});syncBadge()}
 async function resumeKitchen(conf){
@@ -1091,6 +1123,7 @@ function shareBox(){
       <div class="lbl">Código</div><div class="big" style="letter-spacing:.06em">${fmtCode(SYNC.code)}</div>
       <p class="hint">Para invitar a otra persona (o añadir otro dispositivo tuyo), envíale la invitación. Ella abre la app, va a Ajustes ⚙️ → «Unirme» y pega el enlace.</p>
       <div class="btnrow"><button class="btn olive" data-invcopy>📋 Copiar invitación</button>${navigator.share?'<button class="btn" data-invshare>📤 Enviar invitación</button>':''}</div>
+      <button class="btn block" data-resend style="margin-bottom:8px">🔄 Volver a enviar lo de este dispositivo</button>
       <button class="btn ghost danger block" data-leave>Dejar de compartir en este dispositivo</button></div>`;
   }
   return `<div class="box"><h3>👥 Compartir con otra persona</h3>
@@ -1113,21 +1146,24 @@ function mountShare(r){
     if(parseCfg(txt)&&!/cocina=/.test(txt)){ui.shareMode='create';refresh();const f=$('#fbcfg');if(f)f.value=txt;toast('Eso es la configuración de Firebase: la he puesto en «Crear la cocina»');return}
     const{code,cfg}=parseInvite(txt);const c=cfg||SYNC.cfg;
     if(!code){toast('Ese enlace de invitación no es válido. Cópialo entero.');return}if(!c){toast('Usa el enlace de invitación completo');return}
-    if(!(await ask('Lo que hay ahora en este dispositivo se reemplazará por la cocina compartida.','Unirme',false)))return;
-    busy(j,'Conectando…');try{await joinKitchen(c,code);toast('¡Conectada a la cocina compartida!');refresh()}catch(e){toast(e.message||'No se pudo conectar');refresh()}};
+    let keep=false;if(hasOwnData()){const k=await chooseJoin();if(!k)return;keep=k==='keep'}
+    else if(!(await ask('Lo que hay ahora en este dispositivo (solo datos de ejemplo) se sustituirá por la cocina compartida.','Unirme',false)))return;
+    busy(j,'Conectando…');try{await joinKitchen(c,code,keep);toast('¡Conectada a la cocina compartida!');refresh()}catch(e){toast(e.message||'No se pudo conectar');refresh()}};
   const cr=$('[data-create]',r);if(cr)cr.onclick=async()=>{const raw=$('#fbcfg',r).value;if(/cocina=/.test(raw)){ui.shareMode='join';refresh();const f=$('#joinIn');if(f)f.value=raw;toast('Eso es una invitación: la he puesto en «Unirme»');return}
     const cfg=parseCfg(raw);if(!cfg){toast('No reconozco la configuración. Copia el bloque entero de firebaseConfig.');return}
     busy(cr,'Creando…');try{await createKitchen(cfg);toast('Cocina compartida creada');refresh()}catch(e){console.warn(e);await leaveKitchen().catch(()=>{});SYNC.cfg=cfg;toast(e.message||'No se pudo crear');refresh()}};
   const ic=$('[data-invcopy]',r);if(ic)ic.onclick=async()=>{try{await navigator.clipboard.writeText(inviteText());toast('Invitación copiada')}catch(e){toast('No se pudo copiar')}};
   const is=$('[data-invshare]',r);if(is)is.onclick=async()=>{try{await navigator.share({title:'Cocina compartida · Menú',text:inviteText()})}catch(e){}};
+  const rs=$('[data-resend]',r);if(rs)rs.onclick=()=>{if(!SYNC.on){toast('Ahora mismo no hay conexión con Firebase');return}COLS.forEach(c=>{const L=localMaps()[c];Object.keys(L).forEach(id=>delete SYNC.last[c][id])});pushChanges();toast('Enviando todo de nuevo…')};
   const lv=$('[data-leave]',r);if(lv)lv.onclick=async()=>{if(!(await ask('Este dispositivo dejará de sincronizarse. Se queda con una copia de los datos actuales.','Dejar de compartir')))return;await leaveKitchen();toast('Ya no se sincroniza');refresh()};
 }
 async function checkInviteURL(){
   const q=location.search;if(!q.includes('cocina='))return;
   const{code,cfg}=parseInvite(q);try{history.replaceState(null,'',location.pathname)}catch(e){}
   if(!code||!cfg||SYNC.code===code)return;
-  if(!(await ask('Te han invitado a una cocina compartida. Lo que hay ahora en este dispositivo se reemplazará por la cocina compartida.','Unirme',false)))return;
-  try{await joinKitchen(cfg,code);toast('¡Conectada a la cocina compartida!')}catch(e){toast(e.message||'No se pudo conectar')}
+  let keep=false;if(hasOwnData()){const k=await chooseJoin();if(!k)return;keep=k==='keep'}
+  else if(!(await ask('Te han invitado a una cocina compartida. ¿Quieres unirte?','Unirme',false)))return;
+  try{await joinKitchen(cfg,code,keep);toast('¡Conectada a la cocina compartida!')}catch(e){toast(e.message||'No se pudo conectar')}
 }
 
 /* ===== Arranque ===== */
